@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Perplexity MCP Client Example</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+        }
+        .left-panel {
+            flex: 1;
+        }
+        .right-panel {
+            flex: 1;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            margin-bottom: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .events {
+            height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background-color: #f8f9fa;
+        }
+        .event {
+            margin-bottom: 10px;
+            padding: 5px;
+            border-left: 3px solid #007bff;
+            background-color: white;
+        }
+        .tool-selector {
+            margin-bottom: 10px;
+        }
+        select {
+            padding: 5px;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Perplexity MCP Client Example</h1>
+    
+    <div class="status disconnected" id="status">
+        Disconnected
+    </div>
+    
+    <div class="container">
+        <div class="left-panel">
+            <h3>Available Tools</h3>
+            <div class="tool-selector">
+                <select id="toolSelect">
+                    <option value="perplexity_ask">perplexity_ask</option>
+                    <option value="perplexity_research">perplexity_research</option>
+                    <option value="perplexity_reason">perplexity_reason</option>
+                </select>
+                <button onclick="listTools()">List Tools</button>
+            </div>
+            
+            <h3>Send Message</h3>
+            <textarea id="messageInput" placeholder="Enter your message here...">What is the latest news about artificial intelligence?</textarea>
+            <button onclick="sendMessage()" id="sendButton">Send Message</button>
+            
+            <h3>Server Configuration</h3>
+            <div>
+                <label for="serverUrl">Server URL:</label>
+                <input type="text" id="serverUrl" value="http://localhost:3000" style="width: 200px;">
+            </div>
+            <button onclick="connect()" id="connectButton">Connect</button>
+            <button onclick="disconnect()" id="disconnectButton">Disconnect</button>
+        </div>
+        
+        <div class="right-panel">
+            <h3>Events & Responses</h3>
+            <div class="events" id="events"></div>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let isConnected = false;
+
+        function updateStatus(connected) {
+            isConnected = connected;
+            const status = document.getElementById('status');
+            const connectButton = document.getElementById('connectButton');
+            const disconnectButton = document.getElementById('disconnectButton');
+            const sendButton = document.getElementById('sendButton');
+            
+            if (connected) {
+                status.textContent = 'Connected';
+                status.className = 'status connected';
+                connectButton.disabled = true;
+                disconnectButton.disabled = false;
+                sendButton.disabled = false;
+            } else {
+                status.textContent = 'Disconnected';
+                status.className = 'status disconnected';
+                connectButton.disabled = false;
+                disconnectButton.disabled = true;
+                sendButton.disabled = true;
+            }
+        }
+
+        function addEvent(message) {
+            const events = document.getElementById('events');
+            const event = document.createElement('div');
+            event.className = 'event';
+            event.textContent = `${new Date().toLocaleTimeString()}: ${JSON.stringify(message, null, 2)}`;
+            events.appendChild(event);
+            events.scrollTop = events.scrollHeight;
+        }
+
+        function connect() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            eventSource = new EventSource(`${serverUrl}/mcp/events`);
+            
+            eventSource.onopen = function() {
+                updateStatus(true);
+                addEvent({ type: 'connection_opened' });
+            };
+            
+            eventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    addEvent(data);
+                } catch (e) {
+                    addEvent({ type: 'raw_message', data: event.data });
+                }
+            };
+            
+            eventSource.onerror = function(error) {
+                updateStatus(false);
+                addEvent({ type: 'connection_error', error: error });
+            };
+        }
+
+        function disconnect() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            updateStatus(false);
+            addEvent({ type: 'disconnected' });
+        }
+
+        async function listTools() {
+            if (!isConnected) {
+                addEvent({ type: 'error', message: 'Not connected' });
+                return;
+            }
+            
+            const serverUrl = document.getElementById('serverUrl').value;
+            
+            try {
+                const response = await fetch(`${serverUrl}/mcp/tools`);
+                const data = await response.json();
+                addEvent({ type: 'tools_response', data: data });
+            } catch (error) {
+                addEvent({ type: 'error', message: error.message });
+            }
+        }
+
+        async function sendMessage() {
+            if (!isConnected) {
+                addEvent({ type: 'error', message: 'Not connected' });
+                return;
+            }
+            
+            const serverUrl = document.getElementById('serverUrl').value;
+            const toolName = document.getElementById('toolSelect').value;
+            const message = document.getElementById('messageInput').value;
+            
+            if (!message.trim()) {
+                addEvent({ type: 'error', message: 'Please enter a message' });
+                return;
+            }
+            
+            const requestBody = {
+                name: toolName,
+                arguments: {
+                    messages: [
+                        {
+                            role: "user",
+                            content: message
+                        }
+                    ]
+                }
+            };
+            
+            addEvent({ type: 'sending_request', data: requestBody });
+            
+            try {
+                const response = await fetch(`${serverUrl}/mcp/call`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                const data = await response.json();
+                addEvent({ type: 'response_received', data: data });
+            } catch (error) {
+                addEvent({ type: 'error', message: error.message });
+            }
+        }
+
+        // Auto-connect on page load
+        window.onload = function() {
+            connect();
+        };
+    </script>
+</body>
+</html> 

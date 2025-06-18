@@ -7,6 +7,8 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import express, { Request, Response } from "express";
+import cors from "cors";
 
 /**
  * Definition of the Perplexity Ask Tool.
@@ -124,6 +126,10 @@ if (!PERPLEXITY_API_KEY) {
   process.exit(1);
 }
 
+// Get transport mode from environment variable
+const TRANSPORT_MODE = process.env.MCP_TRANSPORT_MODE || "stdio"; // "stdio" or "http"
+const HTTP_PORT = parseInt(process.env.MCP_HTTP_PORT || "3000");
+
 /**
  * Performs a chat completion by sending a request to the Perplexity API.
  * Appends citations to the returned message content if they exist.
@@ -224,7 +230,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
  * @param {object} request - The incoming tool call request.
  * @returns {Promise<object>} The response containing the tool's result or an error.
  */
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
   try {
     const { name, arguments: args } = request.params;
     if (!args) {
@@ -289,14 +295,279 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 /**
- * Initializes and runs the server using standard I/O for communication.
- * Logs an error and exits if the server fails to start.
+ * HTTP Server Transport for SSE support
+ */
+class HttpServerTransport {
+  private app: express.Application;
+  private port: number;
+  private clients: Set<Response> = new Set();
+
+  constructor(port: number = 3000) {
+    this.port = port;
+    this.app = express();
+    this.setupMiddleware();
+    this.setupRoutes();
+  }
+
+  private setupMiddleware() {
+    this.app.use(cors());
+    this.app.use(express.json());
+  }
+
+  private setupRoutes() {
+    // Health check endpoint
+    this.app.get("/health", (req: Request, res: Response) => {
+      res.json({ status: "ok", transport: "http", port: this.port });
+    });
+
+    // SSE endpoint for MCP communication
+    this.app.get("/mcp/events", (req: Request, res: Response) => {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Cache-Control",
+      });
+
+      // Send initial connection event
+      res.write(`data: ${JSON.stringify({ type: "connected", timestamp: new Date().toISOString() })}\n\n`);
+
+      // Add client to set
+      this.clients.add(res);
+
+      // Handle client disconnect
+      req.on("close", () => {
+        this.clients.delete(res);
+      });
+    });
+
+    // Endpoint to get available tools
+    this.app.get("/mcp/tools", async (req: Request, res: Response) => {
+      try {
+        const result = {
+          jsonrpc: "2.0",
+          id: "1",
+          result: {
+            tools: [PERPLEXITY_ASK_TOOL, PERPLEXITY_RESEARCH_TOOL, PERPLEXITY_REASON_TOOL]
+          }
+        };
+        res.json(result);
+      } catch (error) {
+        console.error("Error listing tools:", error);
+        res.status(500).json({ error: "Internal server error" });
+      }
+    });
+
+    // Endpoint to call a specific tool
+    this.app.post("/mcp/call", async (req: Request, res: Response) => {
+      try {
+        const { name, arguments: args } = req.body;
+        
+        let result;
+        if (!args) {
+          throw new Error("No arguments provided");
+        }
+        
+        switch (name) {
+          case "perplexity_ask": {
+            if (!Array.isArray(args.messages)) {
+              throw new Error("Invalid arguments for perplexity_ask: 'messages' must be an array");
+            }
+            const messages = args.messages;
+            const response = await performChatCompletion(messages, "sonar-pro");
+            result = {
+              content: [{ type: "text", text: response }],
+              isError: false,
+            };
+            break;
+          }
+          case "perplexity_research": {
+            if (!Array.isArray(args.messages)) {
+              throw new Error("Invalid arguments for perplexity_research: 'messages' must be an array");
+            }
+            const messages = args.messages;
+            const response = await performChatCompletion(messages, "sonar-deep-research");
+            result = {
+              content: [{ type: "text", text: response }],
+              isError: false,
+            };
+            break;
+          }
+          case "perplexity_reason": {
+            if (!Array.isArray(args.messages)) {
+              throw new Error("Invalid arguments for perplexity_reason: 'messages' must be an array");
+            }
+            const messages = args.messages;
+            const response = await performChatCompletion(messages, "sonar-reasoning-pro");
+            result = {
+              content: [{ type: "text", text: response }],
+              isError: false,
+            };
+            break;
+          }
+          default:
+            result = {
+              content: [{ type: "text", text: `Unknown tool: ${name}` }],
+              isError: true,
+            };
+        }
+
+        // Send response via SSE to all connected clients
+        this.broadcast({
+          type: "mcp_response",
+          id: req.body.id || "1",
+          result: result,
+        });
+
+        res.json({
+          jsonrpc: "2.0",
+          id: req.body.id || "1",
+          result: result
+        });
+      } catch (error) {
+        const errorResult = {
+          content: [
+            {
+              type: "text",
+              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+        
+        console.error("Error calling tool:", error);
+        res.status(500).json({
+          jsonrpc: "2.0",
+          id: req.body.id || "1",
+          error: errorResult
+        });
+      }
+    });
+
+    // Endpoint to send MCP requests (alternative to direct endpoints)
+    this.app.post("/mcp/request", async (req: Request, res: Response) => {
+      try {
+        const { method, params, id } = req.body;
+        
+        let result;
+        if (method === "tools/list") {
+          result = {
+            tools: [PERPLEXITY_ASK_TOOL, PERPLEXITY_RESEARCH_TOOL, PERPLEXITY_REASON_TOOL]
+          };
+        } else if (method === "tools/call") {
+          const { name, arguments: args } = params;
+          
+          if (!args) {
+            throw new Error("No arguments provided");
+          }
+          
+          switch (name) {
+            case "perplexity_ask": {
+              if (!Array.isArray(args.messages)) {
+                throw new Error("Invalid arguments for perplexity_ask: 'messages' must be an array");
+              }
+              const messages = args.messages;
+              const response = await performChatCompletion(messages, "sonar-pro");
+              result = {
+                content: [{ type: "text", text: response }],
+                isError: false,
+              };
+              break;
+            }
+            case "perplexity_research": {
+              if (!Array.isArray(args.messages)) {
+                throw new Error("Invalid arguments for perplexity_research: 'messages' must be an array");
+              }
+              const messages = args.messages;
+              const response = await performChatCompletion(messages, "sonar-deep-research");
+              result = {
+                content: [{ type: "text", text: response }],
+                isError: false,
+              };
+              break;
+            }
+            case "perplexity_reason": {
+              if (!Array.isArray(args.messages)) {
+                throw new Error("Invalid arguments for perplexity_reason: 'messages' must be an array");
+              }
+              const messages = args.messages;
+              const response = await performChatCompletion(messages, "sonar-reasoning-pro");
+              result = {
+                content: [{ type: "text", text: response }],
+                isError: false,
+              };
+              break;
+            }
+            default:
+              result = {
+                content: [{ type: "text", text: `Unknown tool: ${name}` }],
+                isError: true,
+              };
+          }
+        } else {
+          throw new Error(`Unknown method: ${method}`);
+        }
+
+        // Send response via SSE to all connected clients
+        this.broadcast({
+          type: "mcp_response",
+          id: id || "1",
+          result: result,
+        });
+
+        res.json({ 
+          status: "sent", 
+          result: {
+            jsonrpc: "2.0",
+            id: id || "1",
+            result: result
+          }
+        });
+      } catch (error) {
+        console.error("Error handling MCP request:", error);
+        res.status(500).json({ error: "Internal server error" });
+      }
+    });
+  }
+
+  private broadcast(data: any) {
+    const message = `data: ${JSON.stringify(data)}\n\n`;
+    this.clients.forEach(client => {
+      client.write(message);
+    });
+  }
+
+  async start() {
+    return new Promise<void>((resolve) => {
+      this.app.listen(this.port, () => {
+        console.error(`Perplexity MCP Server running on HTTP port ${this.port}`);
+        console.error(`SSE endpoint: http://localhost:${this.port}/mcp/events`);
+        console.error(`Health check: http://localhost:${this.port}/health`);
+        console.error(`Tools endpoint: http://localhost:${this.port}/mcp/tools`);
+        console.error(`Call endpoint: http://localhost:${this.port}/mcp/call`);
+        console.error(`Request endpoint: http://localhost:${this.port}/mcp/request`);
+        resolve();
+      });
+    });
+  }
+}
+
+/**
+ * Initializes and runs the server using the specified transport mode.
+ * Supports both stdio and HTTP/SSE transport.
  */
 async function runServer() {
   try {
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    console.error("Perplexity MCP Server running on stdio with Ask, Research, and Reason tools");
+    if (TRANSPORT_MODE === "http") {
+      const transport = new HttpServerTransport(HTTP_PORT);
+      await transport.start();
+    } else {
+      // Default to stdio transport
+      const transport = new StdioServerTransport();
+      await server.connect(transport);
+      console.error("Perplexity MCP Server running on stdio with Ask, Research, and Reason tools");
+    }
   } catch (error) {
     console.error("Fatal error running server:", error);
     process.exit(1);
