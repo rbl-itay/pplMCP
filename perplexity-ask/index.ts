@@ -330,8 +330,8 @@ class HttpServerTransport {
         "Access-Control-Allow-Headers": "Cache-Control",
       });
 
-      // Send initial connection event
-      res.write(`data: ${JSON.stringify({ type: "connected", timestamp: new Date().toISOString() })}\n\n`);
+      // Send initial connection event (optional, can be removed if n8n doesn't expect it)
+      res.write(`data: ${JSON.stringify({ jsonrpc: "2.0", id: null, result: { status: "connected", timestamp: new Date().toISOString() } })}\n\n`);
 
       // Add client to set
       this.clients.add(res);
@@ -353,6 +353,7 @@ class HttpServerTransport {
           }
         };
         res.json(result);
+        // Also broadcast to SSE clients (optional, usually not needed for GET)
       } catch (error) {
         console.error("Error listing tools:", error);
         res.status(500).json({ error: "Internal server error" });
@@ -363,12 +364,10 @@ class HttpServerTransport {
     this.app.post("/mcp/call", async (req: Request, res: Response) => {
       try {
         const { name, arguments: args } = req.body;
-        
         let result;
         if (!args) {
           throw new Error("No arguments provided");
         }
-        
         switch (name) {
           case "perplexity_ask": {
             if (!Array.isArray(args.messages)) {
@@ -412,14 +411,12 @@ class HttpServerTransport {
               isError: true,
             };
         }
-
-        // Send response via SSE to all connected clients
+        // Broadcast JSON-RPC 2.0 result
         this.broadcast({
-          type: "mcp_response",
+          jsonrpc: "2.0",
           id: req.body.id || "1",
-          result: result,
+          result: result
         });
-
         res.json({
           jsonrpc: "2.0",
           id: req.body.id || "1",
@@ -435,8 +432,12 @@ class HttpServerTransport {
           ],
           isError: true,
         };
-        
-        console.error("Error calling tool:", error);
+        // Broadcast JSON-RPC 2.0 error
+        this.broadcast({
+          jsonrpc: "2.0",
+          id: req.body.id || "1",
+          error: errorResult
+        });
         res.status(500).json({
           jsonrpc: "2.0",
           id: req.body.id || "1",
@@ -449,19 +450,22 @@ class HttpServerTransport {
     this.app.post("/mcp/request", async (req: Request, res: Response) => {
       try {
         const { method, params, id } = req.body;
-        
         let result;
         if (method === "tools/list") {
           result = {
             tools: [PERPLEXITY_ASK_TOOL, PERPLEXITY_RESEARCH_TOOL, PERPLEXITY_REASON_TOOL]
           };
+          // Broadcast JSON-RPC 2.0 result
+          this.broadcast({
+            jsonrpc: "2.0",
+            id: id || "1",
+            result: result
+          });
         } else if (method === "tools/call") {
           const { name, arguments: args } = params;
-          
           if (!args) {
             throw new Error("No arguments provided");
           }
-          
           switch (name) {
             case "perplexity_ask": {
               if (!Array.isArray(args.messages)) {
@@ -505,17 +509,15 @@ class HttpServerTransport {
                 isError: true,
               };
           }
+          // Broadcast JSON-RPC 2.0 result
+          this.broadcast({
+            jsonrpc: "2.0",
+            id: id || "1",
+            result: result
+          });
         } else {
           throw new Error(`Unknown method: ${method}`);
         }
-
-        // Send response via SSE to all connected clients
-        this.broadcast({
-          type: "mcp_response",
-          id: id || "1",
-          result: result,
-        });
-
         res.json({ 
           status: "sent", 
           result: {
@@ -525,7 +527,22 @@ class HttpServerTransport {
           }
         });
       } catch (error) {
-        console.error("Error handling MCP request:", error);
+        const { id } = req.body;
+        const errorResult = {
+          content: [
+            {
+              type: "text",
+              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+        // Broadcast JSON-RPC 2.0 error
+        this.broadcast({
+          jsonrpc: "2.0",
+          id: id || "1",
+          error: errorResult
+        });
         res.status(500).json({ error: "Internal server error" });
       }
     });
