@@ -300,8 +300,8 @@ class HttpServerTransport {
       res.json({ status: "ok", transport: "http", port: this.port });
     });
 
-    // SSE endpoint for MCP communication
-    this.app.get("/mcp/events", (req: Request, res: Response) => {
+    // SSE endpoint for MCP communication (supports legacy /sse path)
+    this.app.get(["/mcp/events", "/sse"], (req: Request, res: Response) => {
       res.writeHead(200, {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -611,7 +611,9 @@ class HttpServerTransport {
     return new Promise<void>((resolve) => {
       this.app.listen(this.port, () => {
         console.error(`Perplexity MCP Server running on HTTP port ${this.port}`);
-        console.error(`SSE endpoint: http://localhost:${this.port}/mcp/events`);
+        console.error(
+          `SSE endpoint: http://localhost:${this.port}/mcp/events (alias: /sse)`
+        );
         console.error(`Health check: http://localhost:${this.port}/health`);
         console.error(`Tools endpoint: http://localhost:${this.port}/mcp/tools`);
         console.error(`Call endpoint: http://localhost:${this.port}/mcp/call`);

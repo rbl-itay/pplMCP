@@ -60,8 +60,9 @@ Returns server status and configuration.
 ### 2. SSE Events
 ```
 GET /mcp/events
+GET /sse (alias)
 ```
-Server-Sent Events endpoint for real-time communication.
+Server-Sent Events endpoint for real-time communication. Both paths are supported for compatibility.
 
 ### 3. List Tools
 ```
@@ -189,7 +190,7 @@ To integrate this MCP server with your application using SSE:
 
 1. **Connect to SSE endpoint**:
 ```javascript
-const eventSource = new EventSource('http://localhost:3000/mcp/events');
+const eventSource = new EventSource('http://localhost:3000/mcp/events'); // '/sse' is also supported
 ```
 
 2. **Listen for events**:

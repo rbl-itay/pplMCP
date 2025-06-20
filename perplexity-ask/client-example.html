@@ -156,6 +156,7 @@
                 eventSource.close();
             }
             
+            // Connect to SSE endpoint (/mcp/events or legacy /sse)
             eventSource = new EventSource(`${serverUrl}/mcp/events`);
             
             eventSource.onopen = function() {
