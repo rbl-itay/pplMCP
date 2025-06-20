@@ -10,6 +10,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { randomUUID } from "crypto";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import cors from "cors";
@@ -190,101 +191,77 @@ function performChatCompletion(messages_1) {
         return messageContent;
     });
 }
-// Initialize the server with tool metadata and capabilities
-const server = new Server({
-    name: "example-servers/perplexity-ask",
-    version: "0.1.0",
-}, {
-    capabilities: {
-        tools: {},
-    },
-});
-/**
- * Registers a handler for listing available tools.
- * When the client requests a list of tools, this handler returns all available Perplexity tools.
- */
-server.setRequestHandler(ListToolsRequestSchema, () => __awaiter(void 0, void 0, void 0, function* () {
-    return ({
-        tools: [PERPLEXITY_ASK_TOOL, PERPLEXITY_RESEARCH_TOOL, PERPLEXITY_REASON_TOOL],
+function createServer() {
+    const server = new Server({
+        name: "example-servers/perplexity-ask",
+        version: "0.1.0",
+    }, {
+        capabilities: {
+            tools: {},
+        },
     });
-}));
-/**
- * Registers a handler for calling a specific tool.
- * Processes requests by validating input and invoking the appropriate tool.
- *
- * @param {object} request - The incoming tool call request.
- * @returns {Promise<object>} The response containing the tool's result or an error.
- */
-server.setRequestHandler(CallToolRequestSchema, (request) => __awaiter(void 0, void 0, void 0, function* () {
-    try {
-        const { name, arguments: args } = request.params;
-        if (!args) {
-            throw new Error("No arguments provided");
+    // Registers a handler for listing available tools.
+    server.setRequestHandler(ListToolsRequestSchema, () => __awaiter(this, void 0, void 0, function* () {
+        return ({
+            tools: [PERPLEXITY_ASK_TOOL, PERPLEXITY_RESEARCH_TOOL, PERPLEXITY_REASON_TOOL],
+        });
+    }));
+    // Registers a handler for calling a specific tool.
+    server.setRequestHandler(CallToolRequestSchema, (request) => __awaiter(this, void 0, void 0, function* () {
+        try {
+            const { name, arguments: args } = request.params;
+            if (!args) {
+                throw new Error("No arguments provided");
+            }
+            switch (name) {
+                case "perplexity_ask": {
+                    if (!Array.isArray(args.messages)) {
+                        throw new Error("Invalid arguments for perplexity_ask: 'messages' must be an array");
+                    }
+                    const messages = args.messages;
+                    const result = yield performChatCompletion(messages, "sonar-pro");
+                    return { content: [{ type: "text", text: result }], isError: false };
+                }
+                case "perplexity_research": {
+                    if (!Array.isArray(args.messages)) {
+                        throw new Error("Invalid arguments for perplexity_research: 'messages' must be an array");
+                    }
+                    const messages = args.messages;
+                    const result = yield performChatCompletion(messages, "sonar-deep-research");
+                    return { content: [{ type: "text", text: result }], isError: false };
+                }
+                case "perplexity_reason": {
+                    if (!Array.isArray(args.messages)) {
+                        throw new Error("Invalid arguments for perplexity_reason: 'messages' must be an array");
+                    }
+                    const messages = args.messages;
+                    const result = yield performChatCompletion(messages, "sonar-reasoning-pro");
+                    return { content: [{ type: "text", text: result }], isError: false };
+                }
+                default:
+                    return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+            }
         }
-        switch (name) {
-            case "perplexity_ask": {
-                if (!Array.isArray(args.messages)) {
-                    throw new Error("Invalid arguments for perplexity_ask: 'messages' must be an array");
-                }
-                // Invoke the chat completion function with the provided messages
-                const messages = args.messages;
-                const result = yield performChatCompletion(messages, "sonar-pro");
-                return {
-                    content: [{ type: "text", text: result }],
-                    isError: false,
-                };
-            }
-            case "perplexity_research": {
-                if (!Array.isArray(args.messages)) {
-                    throw new Error("Invalid arguments for perplexity_research: 'messages' must be an array");
-                }
-                // Invoke the chat completion function with the provided messages using the deep research model
-                const messages = args.messages;
-                const result = yield performChatCompletion(messages, "sonar-deep-research");
-                return {
-                    content: [{ type: "text", text: result }],
-                    isError: false,
-                };
-            }
-            case "perplexity_reason": {
-                if (!Array.isArray(args.messages)) {
-                    throw new Error("Invalid arguments for perplexity_reason: 'messages' must be an array");
-                }
-                // Invoke the chat completion function with the provided messages using the reasoning model
-                const messages = args.messages;
-                const result = yield performChatCompletion(messages, "sonar-reasoning-pro");
-                return {
-                    content: [{ type: "text", text: result }],
-                    isError: false,
-                };
-            }
-            default:
-                // Respond with an error if an unknown tool is requested
-                return {
-                    content: [{ type: "text", text: `Unknown tool: ${name}` }],
-                    isError: true,
-                };
+        catch (error) {
+            return {
+                content: [
+                    { type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` },
+                ],
+                isError: true,
+            };
         }
-    }
-    catch (error) {
-        // Return error details in the response
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-                },
-            ],
-            isError: true,
-        };
-    }
-}));
+    }));
+    return server;
+}
+// Initialize default server instance (used for stdio mode)
+const server = createServer();
 /**
  * HTTP Server Transport for SSE support
  */
 class HttpServerTransport {
     constructor(port = 3000) {
         this.clients = new Set();
+        this.sessions = new Map();
         this.port = port;
         this.app = express();
         this.setupMiddleware();
@@ -308,15 +285,81 @@ class HttpServerTransport {
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Headers": "Cache-Control",
             });
-            // Send initial connection event (optional, can be removed if n8n doesn't expect it)
-            res.write(`data: ${JSON.stringify({ jsonrpc: "2.0", id: null, result: { status: "connected", timestamp: new Date().toISOString() } })}\n\n`);
-            // Add client to set
+            const sessionId = randomUUID();
+            // Tell the client where to POST JSON-RPC messages
+            res.write(`event: endpoint\ndata: /mcp/message?sessionId=${sessionId}\n\n`);
             this.clients.add(res);
-            // Handle client disconnect
+            this.sessions.set(sessionId, res);
             req.on("close", () => {
                 this.clients.delete(res);
+                this.sessions.delete(sessionId);
             });
         });
+        // Endpoint to receive JSON-RPC messages via POST
+        this.app.post("/mcp/message", (req, res) => __awaiter(this, void 0, void 0, function* () {
+            const sessionId = String(req.query.sessionId || "");
+            try {
+                const { method, params, id } = req.body;
+                let result;
+                if (method === "tools/list") {
+                    result = {
+                        tools: [PERPLEXITY_ASK_TOOL, PERPLEXITY_RESEARCH_TOOL, PERPLEXITY_REASON_TOOL]
+                    };
+                    this.broadcast({ jsonrpc: "2.0", id: id || "1", result }, sessionId);
+                }
+                else if (method === "tools/call") {
+                    const { name, arguments: args } = params;
+                    if (!args) {
+                        throw new Error("No arguments provided");
+                    }
+                    switch (name) {
+                        case "perplexity_ask": {
+                            if (!Array.isArray(args.messages)) {
+                                throw new Error("Invalid arguments for perplexity_ask: 'messages' must be an array");
+                            }
+                            const messages = args.messages;
+                            const response = yield performChatCompletion(messages, "sonar-pro");
+                            result = { content: [{ type: "text", text: response }], isError: false };
+                            break;
+                        }
+                        case "perplexity_research": {
+                            if (!Array.isArray(args.messages)) {
+                                throw new Error("Invalid arguments for perplexity_research: 'messages' must be an array");
+                            }
+                            const messages = args.messages;
+                            const response = yield performChatCompletion(messages, "sonar-deep-research");
+                            result = { content: [{ type: "text", text: response }], isError: false };
+                            break;
+                        }
+                        case "perplexity_reason": {
+                            if (!Array.isArray(args.messages)) {
+                                throw new Error("Invalid arguments for perplexity_reason: 'messages' must be an array");
+                            }
+                            const messages = args.messages;
+                            const response = yield performChatCompletion(messages, "sonar-reasoning-pro");
+                            result = { content: [{ type: "text", text: response }], isError: false };
+                            break;
+                        }
+                        default:
+                            result = { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+                    }
+                    this.broadcast({ jsonrpc: "2.0", id: id || "1", result }, sessionId);
+                }
+                else {
+                    throw new Error(`Unknown method: ${method}`);
+                }
+                res.json({ jsonrpc: "2.0", id: id || "1", result });
+            }
+            catch (error) {
+                const { id } = req.body;
+                const errorResult = {
+                    content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+                    isError: true,
+                };
+                this.broadcast({ jsonrpc: "2.0", id: id || "1", error: errorResult }, sessionId);
+                res.status(500).json({ jsonrpc: "2.0", id: id || "1", error: errorResult });
+            }
+        }));
         // Endpoint to get available tools
         this.app.get("/mcp/tools", (req, res) => __awaiter(this, void 0, void 0, function* () {
             try {
@@ -423,6 +466,7 @@ class HttpServerTransport {
         }));
         // Endpoint to send MCP requests (alternative to direct endpoints)
         this.app.post("/mcp/request", (req, res) => __awaiter(this, void 0, void 0, function* () {
+            const sessionId = String(req.query.sessionId || "");
             try {
                 const { method, params, id } = req.body;
                 let result;
@@ -435,7 +479,7 @@ class HttpServerTransport {
                         jsonrpc: "2.0",
                         id: id || "1",
                         result: result
-                    });
+                    }, sessionId);
                 }
                 else if (method === "tools/call") {
                     const { name, arguments: args } = params;
@@ -490,7 +534,7 @@ class HttpServerTransport {
                         jsonrpc: "2.0",
                         id: id || "1",
                         result: result
-                    });
+                    }, sessionId);
                 }
                 else {
                     throw new Error(`Unknown method: ${method}`);
@@ -520,16 +564,24 @@ class HttpServerTransport {
                     jsonrpc: "2.0",
                     id: id || "1",
                     error: errorResult
-                });
+                }, sessionId);
                 res.status(500).json({ error: "Internal server error" });
             }
         }));
     }
-    broadcast(data) {
-        const message = `data: ${JSON.stringify(data)}\n\n`;
-        this.clients.forEach(client => {
-            client.write(message);
-        });
+    broadcast(data, sessionId) {
+        const message = `event: message\ndata: ${JSON.stringify(data)}\n\n`;
+        if (sessionId) {
+            const client = this.sessions.get(sessionId);
+            if (client) {
+                client.write(message);
+            }
+        }
+        else {
+            this.clients.forEach((client) => {
+                client.write(message);
+            });
+        }
     }
     start() {
         return __awaiter(this, void 0, void 0, function* () {
